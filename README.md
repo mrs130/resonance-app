@@ -19,6 +19,25 @@
 
 ## 1. 安装与运行
 
+### 两个本地网站
+
+本项目现在有两个 Streamlit 入口：
+
+```powershell
+# 用户端网站
+python -m streamlit run app.py --server.port 8501
+
+# 后台网站
+python -m streamlit run admin_app.py --server.port 8502
+```
+
+打开地址：
+
+- 用户端：http://localhost:8501
+- 后台端：http://localhost:8502
+
+`localhost` 表示“你自己电脑上的本地网站”，交作业演示时直接打开浏览器访问即可。
+
 ### Windows
 
 ```powershell

@@ -6,7 +6,7 @@ import math
 import os
 import re
 import sqlite3
-from datetime import datetime
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
@@ -18,9 +18,53 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 try:
+    import folium
+    from folium.plugins import MarkerCluster
+    from streamlit_folium import st_folium
+except ImportError:
+    folium = None
+    MarkerCluster = None
+    st_folium = None
+    FOLIUM_IMPORT_ERROR = "folium 或 streamlit-folium 未安装在当前 Streamlit 运行环境。"
+else:
+    FOLIUM_IMPORT_ERROR = ""
+
+try:
     from openai import OpenAI
 except ImportError:
     OpenAI = None
+
+from src.auth_service import (
+    can_enter_main_app,
+    clear_auth_session,
+    is_logged_in,
+    save_auth_session,
+    sign_in_with_password,
+    sign_out,
+    sign_up_with_password,
+    validate_login_input,
+    validate_registration_input,
+)
+from src.config import get_supabase_config
+from src.demo_social_service import (
+    ensure_friend_request_schema,
+    get_friend_request_summary,
+    get_public_feed,
+    parse_tags as parse_json_tags,
+    send_friend_request,
+    update_friend_request_status,
+    valid_map_points,
+)
+from src.footprint_service import add_checkin, combine_datetime, compute_duration_minutes, ensure_footprint_schema
+from src.map_service import GeocodeResult, search_place
+from src.profile_cache_service import (
+    ensure_profile_cache_schema,
+    fetch_cached_profile,
+    save_cached_profile,
+)
+from src.profile_service import fetch_current_profile, update_onboarding_profile
+from src.supabase_client import create_supabase_client, restore_supabase_session
+from views.footprint import render_footprint_page
 
 load_dotenv()
 
@@ -40,34 +84,93 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    .block-container {padding-top: 1.4rem; padding-bottom: 3rem; max-width: 1180px;}
-    [data-testid="stSidebar"] {background: #0f172a;}
-    [data-testid="stSidebar"] * {color: #f8fafc;}
-    .hero {
-        padding: 26px 30px;
-        border: 1px solid #dbeafe;
-        border-radius: 22px;
-        background: linear-gradient(135deg, #eff6ff 0%, #f5f3ff 55%, #fff7ed 100%);
-        margin-bottom: 18px;
+    :root {
+        --ink: #102033;
+        --muted: #64748b;
+        --line: #e5e7eb;
+        --paper: #ffffff;
+        --soft: #f7fafc;
+        --blue: #2563eb;
+        --green: #059669;
+        --orange: #f97316;
+        --purple: #7c3aed;
     }
-    .hero h1 {font-size: 2.1rem; margin: 0 0 6px 0;}
-    .hero p {font-size: 1.02rem; color: #475569; margin: 0;}
+    html, body, [data-testid="stAppViewContainer"] {
+        background: linear-gradient(180deg, #f8fafc 0%, #eef6ff 42%, #f8fafc 100%);
+        color: var(--ink);
+    }
+    .block-container {padding-top: 1.2rem; padding-bottom: 3rem; max-width: 1240px;}
+    [data-testid="stSidebar"] {background: #102033;}
+    [data-testid="stSidebar"] * {color: #f8fafc;}
+    [data-testid="stSidebar"] .stButton button {
+        border-radius: 10px;
+        border: 1px solid rgba(255,255,255,.24);
+        background: rgba(255,255,255,.08);
+    }
+    .hero {
+        padding: 28px 30px;
+        border: 1px solid rgba(37, 99, 235, .16);
+        border-radius: 14px;
+        background:
+            linear-gradient(135deg, rgba(37,99,235,.14), rgba(5,150,105,.10)),
+            #ffffff;
+        box-shadow: 0 16px 42px rgba(15, 23, 42, 0.08);
+        margin-bottom: 16px;
+    }
+    .hero h1 {font-size: 2.05rem; margin: 0 0 8px 0; letter-spacing: 0;}
+    .hero p {font-size: 1rem; color: #475569; margin: 0; max-width: 760px;}
     .card {
-        border: 1px solid #e2e8f0;
-        border-radius: 18px;
-        padding: 18px;
-        background: white;
-        box-shadow: 0 5px 20px rgba(15, 23, 42, 0.04);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 16px;
+        background: rgba(255,255,255,.96);
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06);
         margin-bottom: 12px;
+    }
+    .activity-card {
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 15px 16px;
+        background: #ffffff;
+        margin-bottom: 12px;
+        box-shadow: 0 5px 18px rgba(15, 23, 42, 0.05);
+    }
+    .activity-meta {
+        color: var(--muted);
+        font-size: .88rem;
+        margin-top: 6px;
     }
     .tag {
         display: inline-block;
-        padding: 4px 10px;
+        padding: 3px 9px;
         border-radius: 999px;
-        background: #eef2ff;
-        color: #4338ca;
-        font-size: 0.82rem;
+        background: #e0f2fe;
+        color: #075985;
+        font-size: 0.8rem;
         margin: 2px 5px 2px 0;
+    }
+    .status-pill {
+        display: inline-block;
+        padding: 4px 9px;
+        border-radius: 999px;
+        background: #ecfdf5;
+        color: #047857;
+        font-size: .78rem;
+        font-weight: 650;
+    }
+    .map-legend {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 8px 0 14px 0;
+    }
+    .legend-item {
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        padding: 5px 10px;
+        background: #ffffff;
+        color: #334155;
+        font-size: .82rem;
     }
     .privacy {
         padding: 9px 12px;
@@ -80,9 +183,16 @@ st.markdown(
     .match-score {
         font-size: 2rem;
         font-weight: 750;
-        letter-spacing: -0.04em;
+        letter-spacing: 0;
     }
     .muted {color: #64748b;}
+    div[data-testid="stMetric"] {
+        background: #ffffff;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 12px 14px;
+        box-shadow: 0 4px 14px rgba(15, 23, 42, 0.04);
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -140,9 +250,13 @@ def init_db() -> None:
         );
         """
     )
+    ensure_friend_request_schema(conn)
+    ensure_profile_cache_schema(conn)
+    ensure_footprint_schema(conn, seed_demo=False)
     count = conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"]
     if count == 0:
         seed_demo_data(conn)
+    ensure_footprint_schema(conn, seed_demo=True)
     conn.commit()
     conn.close()
 
@@ -546,14 +660,337 @@ def recent_logs(user_id: int, limit: int = 5) -> pd.DataFrame:
     )
 
 
+def query_rows(sql: str, params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
+    conn = get_conn()
+    try:
+        rows = conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def render_activity_card(item: dict[str, Any]) -> None:
+    tags = "".join(f'<span class="tag">{tag}</span>' for tag in item.get("tags", [])[:5])
+    st.markdown(
+        f"""
+        <div class="activity-card">
+            <div><b>{item.get('avatar', '')} {item.get('nickname', '')}</b>
+                <span class="muted"> · {item.get('city', '')} · {item.get('source', '')}</span>
+            </div>
+            <div style="margin-top:8px">{item.get('content', '')}</div>
+            <div style="margin-top:8px">{tags}</div>
+            <div class="activity-meta">{item.get('mood', '')} · {item.get('social_intent', '')} · {item.get('created_at', '')}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def get_demo_map_points(user_id: int, type_filter: str = "全部") -> list[dict[str, Any]]:
+    checkin_rows = query_rows(
+        """
+        SELECT c.id, c.user_id, u.nickname, u.avatar, c.poi_name, c.poi_type,
+               c.longitude, c.latitude, c.activity, c.tags_json, c.verified, c.created_at
+        FROM checkins c
+        JOIN users u ON u.id = c.user_id
+        WHERE c.privacy NOT IN ('私密', '绉佸瘑')
+        ORDER BY c.created_at DESC
+        """
+    )
+    points: list[dict[str, Any]] = []
+    for row in checkin_rows:
+        tags = parse_json_tags(str(row.get("tags_json", "")))
+        kind = "我的打卡" if int(row["user_id"]) == user_id else "匹配用户常去"
+        points.append(
+            {
+                "source": kind,
+                "category": str(row.get("poi_type", "地点")),
+                "name": row.get("poi_name"),
+                "activity": row.get("activity"),
+                "nickname": row.get("nickname"),
+                "avatar": row.get("avatar"),
+                "longitude": row.get("longitude"),
+                "latitude": row.get("latitude"),
+                "tags": tags,
+                "verified": bool(row.get("verified")),
+            }
+        )
+
+    for poi in DEMO_POIS:
+        try:
+            lon, lat = str(poi["location"]).split(",")
+        except Exception:
+            continue
+        points.append(
+            {
+                "source": "推荐 POI",
+                "category": poi.get("type", "地点"),
+                "name": poi.get("name", "推荐地点"),
+                "activity": f"距离约 {poi.get('distance', '?')} m",
+                "nickname": "Resonance",
+                "avatar": "◎",
+                "longitude": lon,
+                "latitude": lat,
+                "tags": [poi.get("type", "地点")],
+                "verified": False,
+            }
+        )
+
+    valid_points = valid_map_points(points)
+    if type_filter == "全部":
+        return valid_points
+
+    keywords = {
+        "学习": ["学习", "图书馆", "自习", "RAG", "AI", "NLP"],
+        "咖啡": ["咖啡"],
+        "运动": ["跑步", "运动", "公园", "健身"],
+        "展览": ["展览", "美术", "展馆"],
+        "户外": ["户外", "徒步", "公园", "景区"],
+    }.get(type_filter, [])
+
+    def matches(point: dict[str, Any]) -> bool:
+        text = " ".join(
+            [
+                str(point.get("category", "")),
+                str(point.get("name", "")),
+                str(point.get("activity", "")),
+                " ".join(point.get("tags", [])),
+            ]
+        )
+        return any(keyword in text for keyword in keywords)
+
+    return [point for point in valid_points if matches(point)]
+
+
+def create_explore_map(points: list[dict[str, Any]], search_result: GeocodeResult | None = None) -> Any:
+    if search_result:
+        center_lat = search_result.latitude
+        center_lon = search_result.longitude
+        zoom_start = 15
+    else:
+        center_lat = sum(point["latitude"] for point in points) / len(points) if points else 32.1192
+        center_lon = sum(point["longitude"] for point in points) / len(points) if points else 118.9597
+        zoom_start = 12
+    fmap = folium.Map(location=[center_lat, center_lon], zoom_start=zoom_start, tiles=None, control_scale=True)
+    folium.TileLayer("OpenStreetMap", name="OpenStreetMap 免费底图", control=True).add_to(fmap)
+    folium.TileLayer("CartoDB positron", name="浅色备用底图", control=True).add_to(fmap)
+    marker_parent = MarkerCluster(name="地点") if MarkerCluster else fmap
+    if MarkerCluster:
+        marker_parent.add_to(fmap)
+
+    colors = {"我的打卡": "blue", "匹配用户常去": "purple", "推荐 POI": "orange", "公开活动": "green"}
+    for point in points:
+        popup = folium.Popup(
+            f"""
+            <b>{point.get('name', '')}</b><br>
+            {point.get('avatar', '')} {point.get('nickname', '')}<br>
+            {point.get('activity', '')}<br>
+            {' / '.join(point.get('tags', [])[:4])}<br>
+            来源：{point.get('source', '')}
+            """,
+            max_width=280,
+        )
+        folium.Marker(
+            location=[point["latitude"], point["longitude"]],
+            tooltip=f"{point.get('source', '')} · {point.get('name', '')}",
+            popup=popup,
+            icon=folium.Icon(color=colors.get(point.get("source"), "green"), icon="info-sign"),
+        ).add_to(marker_parent)
+
+    if search_result:
+        folium.Marker(
+            location=[search_result.latitude, search_result.longitude],
+            tooltip=f"搜索结果 · {search_result.category}",
+            popup=folium.Popup(f"<b>{search_result.label}</b><br>搜索定位结果", max_width=320),
+            icon=folium.Icon(color="red", icon="search"),
+        ).add_to(fmap)
+
+    folium.LayerControl().add_to(fmap)
+    return fmap
+
+
+def render_basic_streamlit_map(points: list[dict[str, Any]], search_result: GeocodeResult | None = None) -> None:
+    map_df = pd.DataFrame(
+        [
+            {
+                "lat": point["latitude"],
+                "lon": point["longitude"],
+                "地点": point.get("name", ""),
+                "来源": point.get("source", ""),
+                "活动": point.get("activity", ""),
+            }
+            for point in points
+        ]
+    )
+    if search_result:
+        map_df = pd.concat(
+            [
+                pd.DataFrame(
+                    [
+                        {
+                            "lat": search_result.latitude,
+                            "lon": search_result.longitude,
+                            "地点": search_result.label,
+                            "来源": "搜索结果",
+                            "活动": search_result.category,
+                        }
+                    ]
+                ),
+                map_df,
+            ],
+            ignore_index=True,
+        )
+    st.map(map_df, latitude="lat", longitude="lon", size=60, color="#2563eb")
+    st.caption("当前使用基础地图模式。安装 folium 和 streamlit-folium 后会自动切换为可点击弹窗地图。")
+
+
+def search_local_map_points(query: str, points: list[dict[str, Any]]) -> list[GeocodeResult]:
+    keyword = query.strip().lower()
+    if not keyword:
+        return []
+    results: list[GeocodeResult] = []
+    for point in points:
+        haystack = " ".join(
+            [
+                str(point.get("name", "")),
+                str(point.get("category", "")),
+                str(point.get("activity", "")),
+                str(point.get("source", "")),
+                " ".join(point.get("tags", [])),
+            ]
+        ).lower()
+        if keyword in haystack:
+            results.append(
+                GeocodeResult(
+                    label=f"{point.get('name', '地点')} · {point.get('source', '本地点位')}",
+                    latitude=float(point["latitude"]),
+                    longitude=float(point["longitude"]),
+                    category=str(point.get("category", "本地点位")),
+                )
+            )
+    return results[:6]
+
+
+def get_friend_request_rows(user_id: int, view: str) -> list[dict[str, Any]]:
+    if view == "收到的申请":
+        condition = "fr.receiver_id=? AND fr.status='pending'"
+        params = (user_id,)
+    elif view == "发出的申请":
+        condition = "fr.requester_id=? AND fr.status='pending'"
+        params = (user_id,)
+    elif view == "已通过":
+        condition = "(fr.requester_id=? OR fr.receiver_id=?) AND fr.status='accepted'"
+        params = (user_id, user_id)
+    else:
+        condition = "(fr.requester_id=? OR fr.receiver_id=?) AND fr.status='rejected'"
+        params = (user_id, user_id)
+
+    return query_rows(
+        f"""
+        SELECT fr.*, rq.nickname AS requester_name, rq.avatar AS requester_avatar,
+               rc.nickname AS receiver_name, rc.avatar AS receiver_avatar
+        FROM friend_requests fr
+        JOIN users rq ON rq.id = fr.requester_id
+        JOIN users rc ON rc.id = fr.receiver_id
+        WHERE {condition}
+        ORDER BY fr.updated_at DESC
+        """,
+        params,
+    )
+
+
 # --------------------------- Pages ---------------------------
 
-def page_home(user_id: int) -> None:
+def page_home(user_id: int, current_profile: dict[str, Any] | None = None, auth_mode: str = "demo") -> None:
     user = get_user(user_id)
+    if current_profile:
+        user = {
+            **user,
+            "nickname": current_profile.get("nickname") or user["nickname"],
+            "city": current_profile.get("city") or user["city"],
+            "bio": current_profile.get("bio") or user["bio"],
+            "social_goal": current_profile.get("social_goal") or user["social_goal"],
+    }
+    features = collect_user_features(user_id)
+    matches = calculate_matches(user_id)
+    conn = get_conn()
+    try:
+        feed = get_public_feed(conn, current_user_id=user_id, limit=4)
+        friend_summary = get_friend_request_summary(conn, user_id)
+    finally:
+        conn.close()
+    map_points = get_demo_map_points(user_id)
+
+    st.markdown(
+        f"""
+        <div class="hero">
+            <h1>{user['avatar']} 你好，{user['nickname']}</h1>
+            <p>在地图上发现附近的学习、运动、展览和咖啡地点；用动态记录真实生活，再从共同场景里找到更自然的朋友连接。</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    if auth_mode == "supabase":
+        st.info("当前账号资料来自 Supabase；地图、动态和好友申请仍是本地原型数据，用于交作业演示。")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("画像标签", len(features["tags"]))
+    c2.metric("附近点位", len(map_points))
+    c3.metric("待处理申请", friend_summary["incoming_pending"])
+    c4.metric("最高匹配", f"{matches[0]['score']}%" if matches else "暂无")
+
+    left, right = st.columns([1.35, 1])
+    with left:
+        st.subheader("最新动态")
+        if not feed:
+            st.info("还没有可展示的动态。")
+        for item in feed:
+            render_activity_card(item)
+    with right:
+        st.subheader("今日推荐")
+        if matches:
+            top = matches[0]
+            st.markdown(
+                f"""
+                <div class="card">
+                    <div style="font-size:2rem">{top['avatar']}</div>
+                    <h3 style="margin:4px 0">{top['nickname']} · {top['city']}</h3>
+                    <div class="match-score">{top['score']}%</div>
+                    <p class="muted">{top['reasons'][0]}</p>
+                    <span class="status-pill">适合从共同兴趣开启对话</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        st.subheader("附近地图预览")
+        for point in map_points[:4]:
+            st.markdown(
+                f"""
+                <div class="card">
+                    <b>{point.get('name')}</b><br>
+                    <span class="muted">{point.get('source')} · {point.get('activity')}</span>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+    return
+
+    user = get_user(user_id)
+    if current_profile:
+        user = {
+            **user,
+            "nickname": current_profile.get("nickname") or user["nickname"],
+            "city": current_profile.get("city") or user["city"],
+            "bio": current_profile.get("bio") or user["bio"],
+            "social_goal": current_profile.get("social_goal") or user["social_goal"],
+        }
     features = collect_user_features(user_id)
     logs_count = int(query_df("SELECT COUNT(*) AS n FROM life_logs WHERE user_id=?", (user_id,)).iloc[0]["n"])
     check_count = int(query_df("SELECT COUNT(*) AS n FROM checkins WHERE user_id=?", (user_id,)).iloc[0]["n"])
     matches = calculate_matches(user_id)
+
+    if auth_mode == "supabase":
+        st.info("当前昵称和资料来自 Supabase profiles；生活记录、地点打卡和朋友匹配仍是待迁移的本地原型数据，不代表当前真实账号数据。")
 
     st.markdown(
         f"""
@@ -624,6 +1061,186 @@ def page_home(user_id: int) -> None:
         st.info("暂无打卡。")
     else:
         st.dataframe(checks, width="stretch", hide_index=True)
+
+
+def page_explore_map(user_id: int, auth_mode: str = "demo") -> None:
+    st.title("探索地图")
+    st.caption("输入地点即可搜索定位 · OpenStreetMap 免费底图 · 不需要注册地图账号")
+    if auth_mode == "supabase":
+        st.info("Supabase 模式下地图仍使用演示点位，不会写入真实账号位置数据。")
+
+    all_points = get_demo_map_points(user_id, "全部")
+
+    with st.form("place_search_form"):
+        search_cols = st.columns([4, 1])
+        place_query = search_cols[0].text_input(
+            "搜索地点",
+            value=st.session_state.get("place_query", ""),
+            placeholder="例如：南京大学仙林校区、上海外滩、北京故宫",
+        )
+        submitted = search_cols[1].form_submit_button("搜索", type="primary", width="stretch")
+
+    if submitted:
+        st.session_state["place_query"] = place_query.strip()
+        if not place_query.strip():
+            st.warning("请输入要搜索的地点。")
+            st.session_state["place_search_results"] = []
+        else:
+            local_results = search_local_map_points(place_query, all_points)
+            with st.spinner("正在搜索地点..."):
+                try:
+                    remote_results = search_place(place_query, limit=6)
+                except Exception:
+                    remote_results = []
+                    if not local_results:
+                        st.error("地点搜索暂时不可用，请稍后再试，或换一个更具体的关键词。")
+            st.session_state["place_search_results"] = local_results + remote_results
+
+    search_results = st.session_state.get("place_search_results", [])
+    selected_search_result: GeocodeResult | None = None
+    if search_results:
+        labels = [f"{idx + 1}. {result.label}" for idx, result in enumerate(search_results)]
+        selected_label = st.selectbox("选择搜索结果", labels)
+        selected_search_result = search_results[labels.index(selected_label)]
+        st.success(f"已定位：{selected_search_result.label}")
+
+    filters = st.columns([1, 1, 2])
+    type_filter = filters[0].selectbox("地点类型", ["全部", "学习", "咖啡", "运动", "展览", "户外"])
+    show_table = filters[1].toggle("显示点位列表", value=True)
+    filters[2].markdown(
+        """
+        <div class="map-legend">
+            <span class="legend-item">蓝色：我的打卡</span>
+            <span class="legend-item">紫色：匹配用户常去</span>
+            <span class="legend-item">橙色：推荐 POI</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    points = get_demo_map_points(user_id, type_filter)
+    if not points:
+        st.warning("当前筛选下没有可展示的地图点位。")
+        return
+
+    if folium is None or st_folium is None:
+        st.warning(f"{FOLIUM_IMPORT_ERROR} 已自动切换到基础地图模式。")
+        render_basic_streamlit_map(points, selected_search_result)
+    else:
+        fmap = create_explore_map(points, selected_search_result)
+        try:
+            st_folium(fmap, height=560, returned_objects=[], use_container_width=True)
+        except TypeError:
+            st_folium(fmap, height=560, returned_objects=[])
+        except Exception:
+            st.warning("交互地图组件暂时没有加载成功，已自动切换到基础地图模式。")
+            render_basic_streamlit_map(points, selected_search_result)
+
+    if show_table:
+        rows = [
+            {
+                "来源": point.get("source"),
+                "地点": point.get("name"),
+                "活动": point.get("activity"),
+                "用户": point.get("nickname"),
+                "类型": point.get("category"),
+            }
+            for point in points
+        ]
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+
+def page_feed(user_id: int, auth_mode: str = "demo") -> None:
+    st.title("动态")
+    st.caption("展示非私密的生活记录和地点打卡，用于交作业演示社交发现体验。")
+    if auth_mode == "supabase":
+        st.info("动态流仍来自本地 SQLite 原型数据，暂未迁移到 Supabase。")
+
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+    source = c1.selectbox("类型", ["全部", "生活记录", "地点打卡"])
+    same_city = c2.checkbox("同城")
+    limit = c3.selectbox("数量", [10, 20, 50], index=1)
+    keyword = c4.text_input("搜索关键词 / 标签", placeholder="AI、跑步、咖啡、展览...")
+
+    conn = get_conn()
+    try:
+        items = get_public_feed(
+            conn,
+            current_user_id=user_id,
+            source=source,
+            same_city_only=same_city,
+            query=keyword,
+            limit=int(limit),
+        )
+    finally:
+        conn.close()
+
+    if not items:
+        st.warning("当前条件下没有动态。")
+        return
+    for item in items:
+        render_activity_card(item)
+
+
+def page_friend_requests(user_id: int, auth_mode: str = "demo") -> None:
+    st.title("好友申请")
+    st.caption("本页是本地 SQLite 原型功能：可发送、接受、拒绝和取消好友申请。")
+    if auth_mode == "supabase":
+        st.info("好友申请暂未迁移到 Supabase，当前用于课堂演示。")
+
+    conn = get_conn()
+    try:
+        summary = get_friend_request_summary(conn, user_id)
+    finally:
+        conn.close()
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("收到待处理", summary["incoming_pending"])
+    c2.metric("发出待处理", summary["outgoing_pending"])
+    c3.metric("已通过", summary["accepted"])
+    c4.metric("已拒绝", summary["rejected"])
+
+    view = st.radio("申请箱", ["收到的申请", "发出的申请", "已通过", "已拒绝"], horizontal=True)
+    rows = get_friend_request_rows(user_id, view)
+    if not rows:
+        st.info("这里暂时没有申请。")
+        return
+
+    for row in rows:
+        with st.container(border=True):
+            left, right = st.columns([3, 1])
+            with left:
+                st.markdown(
+                    f"**{row['requester_avatar']} {row['requester_name']} → {row['receiver_avatar']} {row['receiver_name']}**"
+                )
+                st.write(row.get("message") or "想和你成为好友。")
+                st.caption(f"状态：{row['status']} · {row['updated_at']}")
+            with right:
+                if view == "收到的申请":
+                    if st.button("接受", key=f"accept_{row['id']}", width="stretch"):
+                        conn = get_conn()
+                        try:
+                            ok, message = update_friend_request_status(conn, int(row["id"]), user_id, "accepted")
+                        finally:
+                            conn.close()
+                        st.success(message) if ok else st.error(message)
+                        st.rerun()
+                    if st.button("拒绝", key=f"reject_{row['id']}", width="stretch"):
+                        conn = get_conn()
+                        try:
+                            ok, message = update_friend_request_status(conn, int(row["id"]), user_id, "rejected")
+                        finally:
+                            conn.close()
+                        st.success(message) if ok else st.error(message)
+                        st.rerun()
+                elif view == "发出的申请":
+                    if st.button("取消", key=f"cancel_{row['id']}", width="stretch"):
+                        conn = get_conn()
+                        try:
+                            ok, message = update_friend_request_status(conn, int(row["id"]), user_id, "cancelled")
+                        finally:
+                            conn.close()
+                        st.success(message) if ok else st.error(message)
+                        st.rerun()
 
 
 def page_log(user_id: int) -> None:
@@ -809,6 +1426,19 @@ def page_matches(user_id: int) -> None:
             for item in match["complementary"]:
                 st.write("• " + item)
             st.info("💬 " + match["icebreaker"])
+            default_topic = match["tags"][0] if match["tags"] else "这些话题"
+            message = st.text_input(
+                "申请留言",
+                value=f"你好，我也对{default_topic}感兴趣，想认识一下。",
+                key=f"friend_message_{match['user_id']}",
+            )
+            if st.button("发送好友申请", key=f"friend_request_{match['user_id']}", type="primary"):
+                conn = get_conn()
+                try:
+                    ok, result_message = send_friend_request(conn, user_id, int(match["user_id"]), message)
+                finally:
+                    conn.close()
+                st.success(result_message) if ok else st.warning(result_message)
 
 
 def page_settings() -> None:
@@ -861,7 +1491,543 @@ def page_settings() -> None:
         st.rerun()
 
 
+# --------------------------- Auth / onboarding ---------------------------
+
+DEMO_USER_SESSION_KEY = "demo_user_id"
+PROTOTYPE_USER_ID = 1
+
+
+def enter_demo_mode() -> None:
+    clear_auth_session(st.session_state)
+    st.session_state["auth_mode"] = "demo"
+    st.session_state.setdefault(DEMO_USER_SESSION_KEY, PROTOTYPE_USER_ID)
+
+
+def render_auth_gate(supabase_client: Any | None, supabase_enabled: bool, status_message: str) -> None:
+    st.title("Resonance")
+    st.caption("请登录、注册，或进入演示模式体验本地原型。")
+
+    if not supabase_enabled:
+        st.warning(status_message)
+        if st.button("进入演示模式", type="primary", width="stretch"):
+            enter_demo_mode()
+            st.rerun()
+        st.stop()
+
+    login_tab, register_tab, demo_tab = st.tabs(["登录", "注册", "演示模式"])
+
+    with login_tab:
+        with st.form("login_form"):
+            email = st.text_input("邮箱")
+            password = st.text_input("密码", type="password")
+            submitted = st.form_submit_button("登录", type="primary", width="stretch")
+        if submitted:
+            errors = validate_login_input(email, password)
+            if errors:
+                for error in errors:
+                    st.error(error)
+            else:
+                result = sign_in_with_password(supabase_client, email, password)
+                if result.ok and result.user and result.session:
+                    save_auth_session(st.session_state, result)
+                    st.success("登录成功。")
+                    st.rerun()
+                else:
+                    st.error(result.message)
+
+    with register_tab:
+        with st.form("register_form"):
+            nickname = st.text_input("昵称")
+            email = st.text_input("邮箱", key="register_email")
+            password = st.text_input("密码", type="password", key="register_password")
+            confirm_password = st.text_input("确认密码", type="password")
+            submitted = st.form_submit_button("注册", type="primary", width="stretch")
+        if submitted:
+            errors = validate_registration_input(nickname, email, password, confirm_password)
+            if errors:
+                for error in errors:
+                    st.error(error)
+            else:
+                result = sign_up_with_password(supabase_client, nickname, email, password)
+                if result.ok:
+                    if result.user and result.session:
+                        save_auth_session(st.session_state, result)
+                        st.success("注册成功，已登录。")
+                        st.rerun()
+                    else:
+                        st.success("注册成功。请检查邮箱完成验证后再登录。")
+                else:
+                    st.error(result.message)
+
+    with demo_tab:
+        st.info("演示模式只使用本地 SQLite 模拟数据，不需要注册，也不会混用真实账号数据。")
+        if st.button("进入演示模式", type="secondary", width="stretch"):
+            enter_demo_mode()
+            st.rerun()
+
+    st.stop()
+
+
+def render_onboarding_page(supabase_client: Any, profile: dict[str, Any] | None) -> None:
+    st.title("完善资料")
+    st.caption("这些信息会保存到你自己的 Supabase profiles 记录中。")
+
+    with st.form("onboarding_form"):
+        nickname = st.text_input("昵称", value=str((profile or {}).get("nickname") or ""))
+        city = st.text_input("城市", value=str((profile or {}).get("city") or ""))
+        bio = st.text_area("简介", value=str((profile or {}).get("bio") or ""), height=120)
+        social_goal = st.text_area("社交目标", value=str((profile or {}).get("social_goal") or ""), height=100)
+        submitted = st.form_submit_button("保存并进入应用", type="primary", width="stretch")
+
+    if submitted:
+        if not nickname.strip():
+            st.error("昵称不能为空。")
+            st.stop()
+        try:
+            updated = update_onboarding_profile(
+                supabase_client,
+                str(st.session_state.get("user_id", "")),
+                nickname=nickname,
+                city=city,
+                bio=bio,
+                social_goal=social_goal,
+            )
+        except Exception:
+            st.error("资料保存失败，请稍后再试。")
+            st.stop()
+
+        st.session_state["profile"] = updated
+        st.success("资料已保存。")
+        st.rerun()
+
+    st.stop()
+
+
 # --------------------------- Main ---------------------------
+
+def page_checkin(user_id: int) -> None:
+    st.title("地点打卡")
+    st.caption("输入地点名称搜索，选择结果后填写活动即可保存打卡。搜索使用 OpenStreetMap 免费服务，不需要地图账号。")
+    privacy_help()
+
+    search_points = get_demo_map_points(user_id, "全部")
+
+    with st.form("checkin_place_search_form"):
+        cols = st.columns([4, 1])
+        place_query = cols[0].text_input(
+            "搜索地点",
+            value=st.session_state.get("checkin_place_query", ""),
+            placeholder="例如：南京大学仙林校区、星巴克、上海外滩、北京故宫",
+        )
+        submitted_search = cols[1].form_submit_button("搜索", type="primary", width="stretch")
+
+    if submitted_search:
+        st.session_state["checkin_place_query"] = place_query.strip()
+        local_results = search_local_map_points(place_query, search_points)
+        remote_results: list[GeocodeResult] = []
+        if place_query.strip():
+            with st.spinner("正在搜索地点..."):
+                try:
+                    remote_results = search_place(place_query, limit=8)
+                except Exception:
+                    if not local_results:
+                        st.error("地点搜索暂时不可用。可以换一个更具体的地点名，或检查网络后重试。")
+        else:
+            st.warning("请输入地点名称。")
+        st.session_state["checkin_place_results"] = local_results + remote_results
+
+    results = st.session_state.get("checkin_place_results", [])
+    selected_result: GeocodeResult | None = None
+
+    if results:
+        labels = [f"{idx + 1}. {result.label}" for idx, result in enumerate(results)]
+        selected_label = st.selectbox("选择打卡地点", labels)
+        selected_result = results[labels.index(selected_label)]
+    else:
+        st.info("先搜索一个地点。课堂演示可试：南京大学仙林校区、图书馆、咖啡、公园。")
+
+    if selected_result:
+        st.markdown(
+            f"""
+            <div class="card">
+                <b>{selected_result.label}</b><br>
+                <span class="muted">{selected_result.category} · {selected_result.longitude:.6f}, {selected_result.latitude:.6f}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        preview_points = [
+            {
+                "latitude": selected_result.latitude,
+                "longitude": selected_result.longitude,
+                "name": selected_result.label,
+                "source": "搜索结果",
+                "activity": selected_result.category,
+            }
+        ]
+        try:
+            render_basic_streamlit_map(preview_points)
+        except Exception:
+            st.caption("地图预览暂时不可用，但地点坐标已可用于保存打卡。")
+
+    with st.form("checkin_save_form", clear_on_submit=False):
+        activity = st.text_input("正在做什么？", placeholder="学习 Python / 复习数学 / 咖啡自习 / 跑步 / 看展")
+        privacy = st.selectbox("打卡权限", ["仅用于匹配", "公开", "私密"], index=0)
+        submitted = st.form_submit_button("保存打卡", type="primary", width="stretch")
+
+    if submitted:
+        if not selected_result:
+            st.error("请先搜索并选择一个地点。")
+            return
+        if not activity.strip():
+            st.error("请填写正在做什么。")
+            return
+
+        analysis = analyze_text(f"{selected_result.label} {selected_result.category} {activity}")
+        conn = get_conn()
+        conn.execute(
+            """
+            INSERT INTO checkins(user_id,poi_name,poi_type,longitude,latitude,activity,privacy,tags_json,verified,created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+            """,
+            (
+                user_id,
+                selected_result.label,
+                selected_result.category,
+                selected_result.longitude,
+                selected_result.latitude,
+                activity.strip(),
+                privacy,
+                json.dumps(analysis["tags"], ensure_ascii=False),
+                0,
+                datetime.now().isoformat(timespec="seconds"),
+            ),
+        )
+        conn.commit()
+        conn.close()
+        st.success("打卡已保存。")
+        render_tags(analysis["tags"])
+
+
+def page_checkin_v2(user_id: int) -> None:
+    st.title("地点打卡")
+    st.caption("输入地点名称搜索，选中后保存为你的足迹。搜索使用 OpenStreetMap/Nominatim 免费服务，不需要地图账号或 API Key。")
+    privacy_help()
+
+    search_points = get_demo_map_points(user_id, "全部")
+    with st.form("checkin_v2_search_form"):
+        cols = st.columns([4, 1])
+        place_query = cols[0].text_input(
+            "搜索地点",
+            value=st.session_state.get("checkin_v2_place_query", ""),
+            placeholder="例如：南京大学仙林校区、星巴克、上海外滩、北京故宫",
+        )
+        submitted_search = cols[1].form_submit_button("搜索", type="primary", width="stretch")
+
+    if submitted_search:
+        st.session_state["checkin_v2_place_query"] = place_query.strip()
+        local_results = search_local_map_points(place_query, search_points)
+        remote_results: list[GeocodeResult] = []
+        if place_query.strip():
+            with st.spinner("正在搜索地点..."):
+                try:
+                    remote_results = search_place(place_query, limit=8)
+                except Exception:
+                    if not local_results:
+                        st.error("地点搜索暂时不可用。可以换一个更具体的地点名，或稍后重试。")
+        else:
+            st.warning("请输入地点名称。")
+        st.session_state["checkin_v2_place_results"] = local_results + remote_results
+
+    results = st.session_state.get("checkin_v2_place_results", [])
+    selected_result: GeocodeResult | None = None
+    if results:
+        labels = [f"{idx + 1}. {result.label}" for idx, result in enumerate(results)]
+        selected_label = st.selectbox("选择打卡地点", labels)
+        selected_result = results[labels.index(selected_label)]
+        st.markdown(
+            f"""
+            <div class="card">
+                <b>{selected_result.label}</b><br>
+                <span class="muted">{selected_result.category} · {selected_result.longitude:.6f}, {selected_result.latitude:.6f}</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        try:
+            render_basic_streamlit_map(
+                [
+                    {
+                        "latitude": selected_result.latitude,
+                        "longitude": selected_result.longitude,
+                        "name": selected_result.label,
+                        "source": "搜索结果",
+                        "activity": selected_result.category,
+                    }
+                ]
+            )
+        except Exception:
+            st.caption("地图预览暂时不可用，但地点坐标仍可保存。")
+    else:
+        st.info("先搜索一个地点。课堂演示可试：南京大学仙林校区、图书馆、咖啡、公园、上海外滩。")
+
+    with st.form("checkin_v2_save_form", clear_on_submit=False):
+        cols = st.columns([1, 1, 1])
+        visited_day = cols[0].date_input("到访日期", value=date.today())
+        visited_time = cols[1].time_input("开始时间", value=time(hour=15, minute=0))
+        ended_time = cols[2].time_input("结束时间", value=time(hour=16, minute=30))
+        activity = st.text_input("做了什么", placeholder="学习 Python / 复习数学 / 咖啡自习 / 跑步 / 看展")
+        cols2 = st.columns([1, 1, 1])
+        mood = cols2[0].text_input("心情", placeholder="专注、放松、开心")
+        privacy = cols2[1].selectbox("可见范围", ["公开", "仅用于匹配", "私密"], index=1)
+        feed_public = cols2[2].checkbox("生成公开动态", value=False)
+        tag_text = st.text_input("标签", placeholder="最多 8 个，用逗号分隔，例如：学习, AI, 咖啡")
+        notes = st.text_area("备注", placeholder="可以写一点这次打卡发生了什么", height=100)
+        submitted = st.form_submit_button("保存打卡", type="primary", width="stretch")
+
+    if submitted:
+        if not selected_result:
+            st.error("请先搜索并选择一个地点。")
+            return
+        if not activity.strip():
+            st.error("请填写这次打卡做了什么。")
+            return
+
+        visited_at = combine_datetime(visited_day, visited_time)
+        ended_at = combine_datetime(visited_day, ended_time)
+        duration = compute_duration_minutes(visited_at, ended_at)
+        if duration is None:
+            ended_at = None
+        analysis = analyze_text(f"{selected_result.label} {selected_result.category} {activity} {notes}")
+        manual_tags = [part.strip() for part in re.split(r"[,，#\s]+", tag_text) if part.strip()]
+        tags = manual_tags or analysis["tags"]
+        conn = get_conn()
+        try:
+            add_checkin(
+                conn,
+                user_id=user_id,
+                poi_name=selected_result.label,
+                poi_type=selected_result.category,
+                longitude=selected_result.longitude,
+                latitude=selected_result.latitude,
+                activity=activity,
+                privacy=privacy,
+                tags=tags,
+                visited_at=visited_at,
+                ended_at=ended_at,
+                duration_minutes=duration,
+                mood=mood,
+                notes=notes,
+                feed_public=feed_public,
+                verified=0,
+                source="nominatim",
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        st.success("打卡已保存，已经出现在“足迹”页。")
+        render_tags(tags[:8])
+
+
+def page_record_hub(user_id: int) -> None:
+    st.title("记录")
+    tabs = st.tabs(["生活记录", "地点打卡"])
+    with tabs[0]:
+        page_log(user_id)
+    with tabs[1]:
+        page_checkin_v2(user_id)
+
+
+def page_discover_hub(user_id: int, auth_mode: str = "demo") -> None:
+    st.title("发现")
+    tabs = st.tabs(["朋友匹配", "好友申请", "探索地图"])
+    with tabs[0]:
+        page_matches(user_id)
+    with tabs[1]:
+        page_friend_requests(user_id, auth_mode)
+    with tabs[2]:
+        page_explore_map(user_id, auth_mode)
+
+
+def page_footprint_hub(user_id: int, auth_mode: str = "demo") -> None:
+    conn = get_conn()
+    try:
+        render_footprint_page(conn, user_id, auth_mode=auth_mode)
+    finally:
+        conn.close()
+
+
+def render_onboarding_page(supabase_client: Any, profile: dict[str, Any] | None) -> None:
+    st.title("完善资料")
+    st.caption("优先保存到 Supabase profiles；如果后端策略暂时不允许更新，会为本次课堂演示暂存在浏览器会话里。")
+
+    with st.form("onboarding_form_v2"):
+        nickname = st.text_input("昵称", value=str((profile or {}).get("nickname") or ""))
+        city = st.text_input("城市", value=str((profile or {}).get("city") or ""))
+        bio = st.text_area("简介", value=str((profile or {}).get("bio") or ""), height=120)
+        social_goal = st.text_area("社交目标", value=str((profile or {}).get("social_goal") or ""), height=100)
+        submitted = st.form_submit_button("保存并进入应用", type="primary", width="stretch")
+
+    if submitted:
+        if not nickname.strip():
+            st.error("昵称不能为空。")
+            st.stop()
+
+        fallback_profile = {
+            "id": str(st.session_state.get("user_id", "")),
+            "nickname": nickname.strip(),
+            "city": city.strip(),
+            "bio": bio.strip(),
+            "social_goal": social_goal.strip(),
+            "onboarding_completed": True,
+            "created_at": None,
+            "updated_at": None,
+        }
+
+        try:
+            updated = update_onboarding_profile(
+                supabase_client,
+                str(st.session_state.get("user_id", "")),
+                nickname=nickname,
+                city=city,
+                bio=bio,
+                social_goal=social_goal,
+            )
+        except Exception:
+            updated = fallback_profile
+            st.session_state["profile_save_mode"] = "session_fallback"
+            st.warning("Supabase 资料保存暂时失败，已为本次演示暂存资料并进入应用。")
+        else:
+            if not updated:
+                updated = fallback_profile
+                st.session_state["profile_save_mode"] = "session_fallback"
+                st.warning("Supabase 没有返回已保存资料，已为本次演示暂存资料并进入应用。")
+            else:
+                st.session_state["profile_save_mode"] = "supabase"
+                st.success("资料已保存到 Supabase。")
+
+        st.session_state["profile"] = updated
+        st.session_state["onboarding_profile_fallback"] = updated
+        conn = get_conn()
+        try:
+            save_cached_profile(
+                conn,
+                updated,
+                user_email=str(st.session_state.get("user_email", "")),
+            )
+        finally:
+            conn.close()
+        st.rerun()
+
+    st.stop()
+
+init_db()
+
+supabase_config = get_supabase_config()
+supabase_state = create_supabase_client(supabase_config)
+
+if not supabase_state.enabled and st.session_state.get("auth_mode") != "demo":
+    enter_demo_mode()
+
+if supabase_state.enabled and is_logged_in(st.session_state):
+    restore_supabase_session(
+        supabase_state.client,
+        st.session_state.get("access_token"),
+        st.session_state.get("refresh_token"),
+    )
+
+if st.session_state.get("auth_mode") != "demo" and not is_logged_in(st.session_state):
+    render_auth_gate(supabase_state.client, supabase_state.enabled, supabase_state.message)
+
+auth_mode = st.session_state.get("auth_mode", "demo")
+current_profile: dict[str, Any] | None = None
+
+if auth_mode == "supabase":
+    try:
+        current_profile = fetch_current_profile(supabase_state.client, str(st.session_state.get("user_id", "")))
+        st.session_state["profile"] = current_profile
+    except Exception:
+        st.error("读取个人资料失败，请稍后再试。")
+        if st.button("退出登录", type="secondary"):
+            sign_out(supabase_state.client, st.session_state)
+            st.rerun()
+        st.stop()
+
+    fallback_profile = st.session_state.get("onboarding_profile_fallback")
+    if not (current_profile or {}).get("onboarding_completed") and (fallback_profile or {}).get("onboarding_completed"):
+        current_profile = fallback_profile
+        st.session_state["profile"] = fallback_profile
+    if not (current_profile or {}).get("onboarding_completed"):
+        conn = get_conn()
+        try:
+            cached_profile = fetch_cached_profile(conn, str(st.session_state.get("user_id", "")))
+        finally:
+            conn.close()
+        if (cached_profile or {}).get("onboarding_completed"):
+            current_profile = cached_profile
+            st.session_state["profile"] = cached_profile
+            st.session_state["profile_save_mode"] = "local_cache"
+
+    if not can_enter_main_app(st.session_state, current_profile):
+        with st.sidebar:
+            st.markdown("# Resonance")
+            st.caption("Supabase 账号")
+            if st.button("退出登录", type="secondary", width="stretch"):
+                sign_out(supabase_state.client, st.session_state)
+                st.rerun()
+        render_onboarding_page(supabase_state.client, current_profile)
+
+users_df = query_df("SELECT id,nickname,avatar,city FROM users ORDER BY id")
+user_labels = {
+    f"{row['avatar']} {row['nickname']} 路 {row['city']}": int(row["id"])
+    for _, row in users_df.iterrows()
+}
+
+with st.sidebar:
+    st.markdown("# Resonance")
+    if auth_mode == "supabase":
+        st.caption("Supabase 模式")
+        st.write(st.session_state.get("user_email", ""))
+        current_user_id = PROTOTYPE_USER_ID
+        st.info("原型记录与匹配使用本地沙盒数据，待迁移到 Supabase。")
+        if st.button("退出登录", type="secondary", width="stretch"):
+            sign_out(supabase_state.client, st.session_state)
+            st.rerun()
+    else:
+        st.caption("演示模式")
+        selected_label = st.selectbox("当前演示用户", list(user_labels.keys()))
+        current_user_id = user_labels[selected_label]
+        st.info("演示模式只使用本地 SQLite 模拟数据。")
+        if supabase_state.enabled and st.button("返回登录 / 注册", type="secondary", width="stretch"):
+            clear_auth_session(st.session_state)
+            st.rerun()
+
+    st.divider()
+    page = st.radio(
+        "导航",
+        ["🏠 首页", "✍️ 记录", "🗺️ 足迹", "🤝 发现", "📰 动态", "👤 我的"],
+        label_visibility="collapsed",
+    )
+    st.divider()
+    st.caption("MVP 原型 · 不自动提交 Git")
+
+if auth_mode == "supabase" and page != "🏠 首页":
+    st.warning("当前页面仍使用本地原型数据，尚未迁移到 Supabase，不代表当前真实账号数据。")
+
+if page == "🏠 首页":
+    page_home(current_user_id, current_profile, auth_mode)
+elif page == "✍️ 记录":
+    page_record_hub(current_user_id)
+elif page == "🗺️ 足迹":
+    page_footprint_hub(current_user_id, auth_mode)
+elif page == "🤝 发现":
+    page_discover_hub(current_user_id, auth_mode)
+elif page == "📰 动态":
+    page_feed(current_user_id, auth_mode)
+else:
+    page_settings()
+
+st.stop()
 
 init_db()
 

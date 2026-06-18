@@ -4,3 +4,5 @@ __pycache__/
 *.pyc
 data/*.db
 .streamlit/
+.pytest_cache/
+pytest-cache-files-*/
