@@ -3,6 +3,6 @@
 __pycache__/
 *.pyc
 data/*.db
-.streamlit/
+.streamlit/secrets.toml
 .pytest_cache/
 pytest-cache-files-*/

@@ -1441,9 +1441,84 @@ def page_matches(user_id: int) -> None:
                 st.success(result_message) if ok else st.warning(result_message)
 
 
-def page_settings() -> None:
-    st.title("⚙️ 配置与隐私")
-    st.subheader("当前能力状态")
+def page_my(user_id: int, current_profile: dict[str, Any] | None = None, auth_mode: str = "demo") -> None:
+    st.title("👤 我的")
+
+    if auth_mode == "supabase" and current_profile:
+        st.caption("当前账号资料")
+        profile_name = str(current_profile.get("nickname") or st.session_state.get("user_email") or "未命名用户")
+        profile_city = str(current_profile.get("city") or "未填写城市")
+        profile_bio = str(current_profile.get("bio") or "还没有填写简介。")
+        profile_goal = str(current_profile.get("social_goal") or "还没有填写社交目标。")
+        avatar = "🙂"
+        account_note = "Supabase 账号"
+    else:
+        user = get_user(user_id)
+        profile_name = str(user["nickname"])
+        profile_city = str(user["city"])
+        profile_bio = str(user["bio"])
+        profile_goal = str(user["social_goal"])
+        avatar = str(user["avatar"])
+        account_note = "演示用户"
+
+    with st.container(border=True):
+        left, right = st.columns([0.9, 4])
+        with left:
+            st.markdown(f"<div style='font-size:4rem;line-height:1'>{avatar}</div>", unsafe_allow_html=True)
+        with right:
+            st.markdown(f"### {profile_name}")
+            st.caption(f"{account_note} · {profile_city}")
+            st.write(profile_bio)
+            st.info(f"社交目标：{profile_goal}")
+
+    stats = pd.DataFrame(
+        [
+            {"指标": "生活记录", "数量": int(query_df("SELECT COUNT(*) FROM life_logs WHERE user_id=?", (user_id,)).iloc[0, 0])},
+            {"指标": "地点打卡", "数量": int(query_df("SELECT COUNT(*) FROM checkins WHERE user_id=?", (user_id,)).iloc[0, 0])},
+            {
+                "指标": "公开动态",
+                "数量": int(
+                    query_df(
+                        """
+                        SELECT
+                            (SELECT COUNT(*) FROM life_logs WHERE user_id=? AND privacy='公开')
+                            +
+                            (SELECT COUNT(*) FROM checkins WHERE user_id=? AND privacy='公开')
+                        """,
+                        (user_id, user_id),
+                    ).iloc[0, 0]
+                ),
+            },
+        ]
+    )
+    metric_cols = st.columns(len(stats))
+    for col, (_, row) in zip(metric_cols, stats.iterrows()):
+        col.metric(str(row["指标"]), int(row["数量"]))
+
+    st.subheader("隐私设置")
+    st.markdown(
+        """
+        - 私密记录不会参与匹配，也不会显示给其他用户。
+        - “仅用于匹配”的记录只用于生成抽象画像，其他用户看不到原文。
+        - 公开内容会进入动态流，用来演示社交发现体验。
+        """
+    )
+
+    with st.expander("当前能力状态"):
+        status = render_capability_status()
+        st.dataframe(status, width="stretch", hide_index=True)
+
+    with st.expander("重置演示数据库"):
+        st.caption("会删除你在本地或云端会话中新增的演示记录，并恢复内置模拟数据。")
+        if st.button("重置数据", type="secondary"):
+            if DB_PATH.exists():
+                DB_PATH.unlink()
+            init_db()
+            st.success("演示数据已恢复。")
+            st.rerun()
+
+
+def render_capability_status() -> pd.DataFrame:
     status = pd.DataFrame(
         [
             {
@@ -1468,27 +1543,7 @@ def page_settings() -> None:
             },
         ]
     )
-    st.dataframe(status, width="stretch", hide_index=True)
-
-    st.subheader("隐私边界")
-    st.markdown(
-        """
-        - 原始记录默认不公开；“私密”内容完全不参与匹配。
-        - “仅用于匹配”只用于生成抽象画像，其他用户不看到原文。
-        - 不展示实时精确位置；正式产品应采用区域模糊化与延迟公开。
-        - 不根据记录推断政治、宗教、疾病、性取向等敏感属性。
-        - 本原型没有真实账号、聊天和内容审核，不能直接作为生产社交平台上线。
-        """
-    )
-
-    st.subheader("重置演示数据库")
-    st.caption("会删除你在本地新增的记录，并恢复内置模拟数据。")
-    if st.button("重置数据", type="secondary"):
-        if DB_PATH.exists():
-            DB_PATH.unlink()
-        init_db()
-        st.success("演示数据已恢复。")
-        st.rerun()
+    return status
 
 
 # --------------------------- Auth / onboarding ---------------------------
@@ -2025,7 +2080,7 @@ elif page == "🤝 发现":
 elif page == "📰 动态":
     page_feed(current_user_id, auth_mode)
 else:
-    page_settings()
+    page_my(current_user_id, current_profile, auth_mode)
 
 st.stop()
 
@@ -2060,4 +2115,4 @@ elif page == "地点打卡":
 elif page == "朋友匹配":
     page_matches(current_user_id)
 else:
-    page_settings()
+    page_my(current_user_id)

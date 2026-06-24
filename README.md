@@ -1,6 +1,14 @@
 
 # 共振 Resonance — 生活记录与朋友匹配 App 原型
 
+## 在线演示
+
+- 用户端 Demo：<https://resonance-app-yrzurbmupro4fvblbm6zpj.streamlit.app/>
+- 代码仓库：<https://github.com/mrs130/resonance-app>
+- 老师打开后：点击 **进入演示模式**，无需注册、无需 API Key，即可查看完整原型。
+
+部署步骤见 [DEPLOYMENT.md](DEPLOYMENT.md)。本项目是 Streamlit App，不能直接用 GitHub Pages 跑 Python 后端；推荐部署到 Streamlit Community Cloud。
+
 这是一个可直接运行的 Streamlit MVP，用于验证以下闭环：
 
 > 生活记录 / 地点打卡 → AI 或规则提取低敏感度标签 → 动态用户画像 → 可解释朋友匹配
@@ -41,7 +49,7 @@ python -m streamlit run admin_app.py --server.port 8502
 ### Windows
 
 ```powershell
-cd resonance_mvp
+cd resonance-app
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
@@ -54,7 +62,7 @@ streamlit run app.py
 ### macOS / Linux
 
 ```bash
-cd resonance_mvp
+cd resonance-app
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
